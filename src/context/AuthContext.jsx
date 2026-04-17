@@ -1,6 +1,7 @@
 import { createContext, useContext, useState, useCallback, useEffect } from 'react'
 import { clearTokens } from '../api/axiosInstance'
 import * as authApi from '../api/authApi'
+import TokenExpiredModal from '../components/TokenExpiredModal'
 
 // ============================================================
 // AuthContext – quản lý trạng thái đăng nhập toàn cục
@@ -8,21 +9,25 @@ import * as authApi from '../api/authApi'
 const AuthContext = createContext(null)
 
 export const AuthProvider = ({ children }) => {
-  // null = chưa biết, object = đã đăng nhập, false = chưa đăng nhập
   const [user, setUser] = useState(null)
-
-  // State trung gian: đang chờ nhập mã TOTP
-  // { tempToken: string }
   const [pendingTwoFA, setPendingTwoFA] = useState(null)
+  const [expiredTokenMessage, setExpiredTokenMessage] = useState(null)
+  const [loading, setLoading] = useState(true)
 
-  const [loading, setLoading] = useState(true)  // khởi tạo app
+  // Lắng nghe sự kiện token hết hạn từ axios interceptor
+  useEffect(() => {
+    const handler = (e) => {
+      setExpiredTokenMessage(e.detail.message)
+      setUser(false) // Đặt user về chưa đăng nhập
+    }
+    window.addEventListener('auth-token-expired', handler)
+    return () => window.removeEventListener('auth-token-expired', handler)
+  }, [])
 
   // Khởi tạo: kiểm tra token còn trong localStorage không
   useEffect(() => {
     const token = localStorage.getItem('access_token')
     if (token) {
-      // Có token → coi như đã đăng nhập (interceptor tự refresh nếu hết hạn)
-      // Có thể gọi GET /api/users/me ở đây nếu backend có endpoint đó
       setUser({ token })
     } else {
       setUser(false)
@@ -30,28 +35,30 @@ export const AuthProvider = ({ children }) => {
     setLoading(false)
   }, [])
 
+  const clearExpiredTokenMessage = useCallback(() => {
+    setExpiredTokenMessage(null)
+  }, [])
+
   // -------------------------------------------------------
   // loginStep1: gửi username + password
-  // Trả về: { requiresTwoFA: bool }
   // -------------------------------------------------------
   const loginStep1 = useCallback(async ({ username, password }) => {
     const data = await authApi.login({ username, password })
 
     if (data.requires_2fa) {
-      // Lưu tempToken để dùng ở bước 2
       setPendingTwoFA({ tempToken: data.temp_token })
       return { requiresTwoFA: true }
     }
 
-    // Đăng nhập thành công không cần 2FA
     localStorage.setItem('access_token', data.access_token)
     localStorage.setItem('refresh_token', data.refresh_token)
     setUser({ token: data.access_token })
+    clearExpiredTokenMessage()
     return { requiresTwoFA: false }
-  }, [])
+  }, [clearExpiredTokenMessage])
 
   // -------------------------------------------------------
-  // loginStep2: gửi tempToken + mã TOTP 6 số
+  // loginStep2: gửi tempToken + mã TOTP
   // -------------------------------------------------------
   const loginStep2 = useCallback(async (code) => {
     if (!pendingTwoFA) throw new Error('Không có phiên xác thực 2FA')
@@ -63,7 +70,8 @@ export const AuthProvider = ({ children }) => {
     localStorage.setItem('refresh_token', data.refresh_token)
     setUser({ token: data.access_token })
     setPendingTwoFA(null)
-  }, [pendingTwoFA])
+    clearExpiredTokenMessage()
+  }, [pendingTwoFA, clearExpiredTokenMessage])
 
   // -------------------------------------------------------
   // logout
@@ -77,8 +85,9 @@ export const AuthProvider = ({ children }) => {
       clearTokens()
       setUser(false)
       setPendingTwoFA(null)
+      clearExpiredTokenMessage()
     }
-  }, [])
+  }, [clearExpiredTokenMessage])
 
   const cancelTwoFA = useCallback(() => setPendingTwoFA(null), [])
 
@@ -91,9 +100,16 @@ export const AuthProvider = ({ children }) => {
     loginStep2,
     logoutUser,
     cancelTwoFA,
+    expiredTokenMessage,
+    clearExpiredTokenMessage,
   }
 
-  return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>
+  return (
+    <AuthContext.Provider value={value}>
+      {children}
+      <TokenExpiredModal />
+    </AuthContext.Provider>
+  )
 }
 
 // Hook tắt gọn

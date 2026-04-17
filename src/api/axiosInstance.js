@@ -1,17 +1,11 @@
 import axios from 'axios'
 
-// ============================================================
-// Axios instance – base URL trỏ vào proxy Vite (/api -> :8080)
-// ============================================================
 const api = axios.create({
   baseURL: '/api',
   timeout: 10000,
   headers: { 'Content-Type': 'application/json' },
 })
 
-// ============================================================
-// REQUEST INTERCEPTOR – tự động đính kèm access token
-// ============================================================
 api.interceptors.request.use(
   (config) => {
     const token = localStorage.getItem('access_token')
@@ -23,9 +17,6 @@ api.interceptors.request.use(
   (error) => Promise.reject(error)
 )
 
-// ============================================================
-// RESPONSE INTERCEPTOR – xử lý 401 & tự động refresh token
-// ============================================================
 let isRefreshing = false
 let failedQueue = []
 
@@ -39,13 +30,32 @@ api.interceptors.response.use(
   async (error) => {
     const original = error.config
 
-    // Lỗi 401 – thử refresh token (chỉ 1 lần, _retry tránh vòng lặp)
-    if (error.response?.status === 401 && !original._retry) {
+    // 1. Chuẩn hóa message lỗi (luôn thực hiện trước)
+    error.userMessage =
+      error.response?.data?.message ||
+      error.response?.data?.error ||
+      (typeof error.response?.data === 'string' ? error.response.data : null) ||
+      error.message ||
+      'Đã có lỗi xảy ra, vui lòng thử lại.'
 
-      // Chính endpoint refresh bị 401 → đăng xuất hẳn
+    // 2. Map lỗi 400 fieldErrors
+    if (error.response?.data?.fieldErrors) {
+      error.fieldErrors = error.response.data.fieldErrors
+    }
+
+    // 3. Xử lý refresh token cho lỗi 401
+    if (error.response?.status === 401 && !original._retry) {
+      // Bỏ qua xử lý refresh cho endpoint đăng nhập
+      if (original.url?.includes('/auth/login')) {
+        return Promise.reject(error)
+      }
+
+      // Refresh token endpoint bị 401 -> thông báo hết hạn
       if (original.url?.includes('/auth/refresh-token')) {
         clearTokens()
-        window.location.href = '/login'
+        window.dispatchEvent(new CustomEvent('auth-token-expired', {
+          detail: { message: error.userMessage }
+        }))
         return Promise.reject(error)
       }
 
@@ -63,7 +73,9 @@ api.interceptors.response.use(
       const refreshToken = localStorage.getItem('refresh_token')
       if (!refreshToken) {
         clearTokens()
-        window.location.href = '/login'
+        window.dispatchEvent(new CustomEvent('auth-token-expired', {
+          detail: { message: error.userMessage }
+        }))
         return Promise.reject(error)
       }
 
@@ -80,26 +92,16 @@ api.interceptors.response.use(
         original.headers.Authorization = `Bearer ${newAccess}`
         return api(original)
       } catch (e) {
-        processQueue(e, null)
         clearTokens()
-        window.location.href = '/login'
+        const msg = e.userMessage || error.userMessage || 'Phiên đăng nhập đã hết hạn'
+        window.dispatchEvent(new CustomEvent('auth-token-expired', {
+          detail: { message: msg }
+        }))
+        processQueue(e, null)
         return Promise.reject(e)
       } finally {
         isRefreshing = false
       }
-    }
-
-    // Chuẩn hoá message lỗi để component chỉ cần đọc error.userMessage
-    error.userMessage =
-      error.response?.data?.message ||
-      error.response?.data?.error ||
-      (typeof error.response?.data === 'string' ? error.response.data : null) ||
-      error.message ||
-      'Đã có lỗi xảy ra, vui lòng thử lại.'
-
-    // Map lỗi 400 fieldErrors (từ @Valid backend)
-    if (error.response?.data?.fieldErrors) {
-      error.fieldErrors = error.response.data.fieldErrors
     }
 
     return Promise.reject(error)
